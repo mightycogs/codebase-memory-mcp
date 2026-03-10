@@ -1,6 +1,6 @@
 module github.com/mightycogs/codebase-memory-mcp
 
-go 1.26
+go 1.25
 
 require (
 	github.com/mattn/go-sqlite3 v1.14.34

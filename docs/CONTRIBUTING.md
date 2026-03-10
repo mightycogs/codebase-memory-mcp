@@ -4,7 +4,7 @@ Contributions are welcome. This guide covers setup, testing, and PR guidelines.
 
 ## Build from Source
 
-**Prerequisites**: Go 1.26+, a C compiler (gcc or clang — needed for tree-sitter CGO bindings), Git.
+**Prerequisites**: Go 1.25+, a C compiler (gcc or clang — needed for tree-sitter CGO bindings), Git.
 
 ```bash
 git clone https://github.com/mightycogs/codebase-memory-mcp.git

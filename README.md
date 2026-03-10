@@ -16,7 +16,7 @@ Single Go binary. No Docker, no databases, no API keys.
 
 ## Getting Started
 
-Requires Go 1.26+ and a C compiler (`xcode-select --install` on macOS).
+Requires Go 1.25+ and a C compiler (`xcode-select --install` on macOS).
 
 ```bash
 git clone https://github.com/mightycogs/codebase-memory-mcp.git
