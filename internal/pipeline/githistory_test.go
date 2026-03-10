@@ -96,3 +96,161 @@ func TestComputeChangeCouplingLimitsTo100(t *testing.T) {
 		t.Errorf("expected max 100 couplings, got %d", len(couplings))
 	}
 }
+
+func TestComputeChangeCoupling_EmptyCommits(t *testing.T) {
+	couplings := computeChangeCoupling(nil)
+	if len(couplings) != 0 {
+		t.Errorf("expected 0 couplings from nil commits, got %d", len(couplings))
+	}
+}
+
+func TestComputeChangeCoupling_SingleFileCommits(t *testing.T) {
+	commits := []CommitFiles{
+		{Hash: "a", Files: []string{"a.go"}},
+		{Hash: "b", Files: []string{"a.go"}},
+		{Hash: "c", Files: []string{"a.go"}},
+	}
+	couplings := computeChangeCoupling(commits)
+	if len(couplings) != 0 {
+		t.Errorf("expected 0 couplings (no pairs), got %d", len(couplings))
+	}
+}
+
+func TestComputeChangeCoupling_LowScoreFiltered(t *testing.T) {
+	commits := []CommitFiles{
+		{Hash: "a", Files: []string{"x.go", "y.go"}},
+		{Hash: "b", Files: []string{"x.go", "y.go"}},
+		{Hash: "c", Files: []string{"x.go", "y.go"}},
+		{Hash: "d", Files: []string{"x.go"}},
+		{Hash: "e", Files: []string{"x.go"}},
+		{Hash: "f", Files: []string{"x.go"}},
+		{Hash: "g", Files: []string{"x.go"}},
+		{Hash: "h", Files: []string{"x.go"}},
+		{Hash: "i", Files: []string{"x.go"}},
+		{Hash: "j", Files: []string{"x.go"}},
+		{Hash: "k", Files: []string{"x.go"}},
+	}
+	couplings := computeChangeCoupling(commits)
+	for _, c := range couplings {
+		if c.CouplingScore < 0.3 {
+			t.Errorf("coupling %s/%s has score %f below 0.3 threshold", c.FileA, c.FileB, c.CouplingScore)
+		}
+	}
+}
+
+func TestComputeChangeCoupling_SortedByScore(t *testing.T) {
+	var commits []CommitFiles
+	for i := 0; i < 5; i++ {
+		commits = append(commits, CommitFiles{
+			Hash:  fmt.Sprintf("high%d", i),
+			Files: []string{"a.go", "b.go"},
+		})
+	}
+	for i := 0; i < 3; i++ {
+		commits = append(commits, CommitFiles{
+			Hash:  fmt.Sprintf("low%d", i),
+			Files: []string{"c.go", "d.go"},
+		})
+	}
+	couplings := computeChangeCoupling(commits)
+	for i := 1; i < len(couplings); i++ {
+		if couplings[i].CouplingScore > couplings[i-1].CouplingScore {
+			t.Errorf("couplings not sorted: [%d].score=%f > [%d].score=%f",
+				i, couplings[i].CouplingScore, i-1, couplings[i-1].CouplingScore)
+		}
+	}
+}
+
+func TestComputeChangeCoupling_PairOrdering(t *testing.T) {
+	commits := []CommitFiles{
+		{Hash: "a", Files: []string{"z.go", "a.go"}},
+		{Hash: "b", Files: []string{"z.go", "a.go"}},
+		{Hash: "c", Files: []string{"z.go", "a.go"}},
+	}
+	couplings := computeChangeCoupling(commits)
+	if len(couplings) == 0 {
+		t.Fatal("expected at least 1 coupling")
+	}
+	if couplings[0].FileA > couplings[0].FileB {
+		t.Errorf("expected FileA <= FileB, got %q > %q", couplings[0].FileA, couplings[0].FileB)
+	}
+}
+
+func TestComputeChangeCoupling_ExactlyThresholdCount(t *testing.T) {
+	commits := []CommitFiles{
+		{Hash: "a", Files: []string{"x.go", "y.go"}},
+		{Hash: "b", Files: []string{"x.go", "y.go"}},
+		{Hash: "c", Files: []string{"x.go", "y.go"}},
+	}
+	couplings := computeChangeCoupling(commits)
+	found := false
+	for _, c := range couplings {
+		if (c.FileA == "x.go" && c.FileB == "y.go") || (c.FileA == "y.go" && c.FileB == "x.go") {
+			found = true
+			if c.CoChangeCount != 3 {
+				t.Errorf("expected 3 co-changes, got %d", c.CoChangeCount)
+			}
+		}
+	}
+	if !found {
+		t.Error("expected coupling between x.go and y.go at threshold=3")
+	}
+}
+
+func TestComputeChangeCoupling_BelowThreshold(t *testing.T) {
+	commits := []CommitFiles{
+		{Hash: "a", Files: []string{"x.go", "y.go"}},
+		{Hash: "b", Files: []string{"x.go", "y.go"}},
+	}
+	couplings := computeChangeCoupling(commits)
+	if len(couplings) != 0 {
+		t.Errorf("expected 0 couplings with only 2 co-changes, got %d", len(couplings))
+	}
+}
+
+func TestComputeChangeCoupling_Exactly20Files(t *testing.T) {
+	files := make([]string, 20)
+	for i := range files {
+		files[i] = fmt.Sprintf("f%d.go", i)
+	}
+	commits := []CommitFiles{
+		{Hash: "a", Files: files},
+		{Hash: "b", Files: files},
+		{Hash: "c", Files: files},
+	}
+	couplings := computeChangeCoupling(commits)
+	if len(couplings) == 0 {
+		t.Error("expected couplings from 20-file commits (threshold is >20)")
+	}
+}
+
+func TestIsTrackableFile_Extended(t *testing.T) {
+	tests := []struct {
+		path string
+		want bool
+	}{
+		{".cache/foo.js", false},
+		{"Cargo.lock", false},
+		{"poetry.lock", false},
+		{"composer.lock", false},
+		{"Gemfile.lock", false},
+		{"Pipfile.lock", false},
+		{"pnpm-lock.yaml", false},
+		{"yarn.lock", false},
+		{"bundle.min.js", false},
+		{"style.min.css", false},
+		{"source.map", false},
+		{"module.wasm", false},
+		{"logo.jpg", false},
+		{"icon.gif", false},
+		{"favicon.ico", false},
+		{"drawing.svg", false},
+		{"src/deep/nested/file.ts", true},
+		{"Makefile", true},
+	}
+	for _, tt := range tests {
+		if got := isTrackableFile(tt.path); got != tt.want {
+			t.Errorf("isTrackableFile(%q) = %v, want %v", tt.path, got, tt.want)
+		}
+	}
+}

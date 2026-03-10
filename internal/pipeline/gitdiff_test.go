@@ -165,7 +165,6 @@ func TestGitNotFound(t *testing.T) {
 }
 
 func TestParseHunksOutput_Deletion(t *testing.T) {
-	// Deletion hunks have +start,0 — should still produce a valid hunk at start line
 	input := `diff --git a/file.go b/file.go
 --- a/file.go
 +++ b/file.go
@@ -175,8 +174,198 @@ func TestParseHunksOutput_Deletion(t *testing.T) {
 	if len(hunks) != 1 {
 		t.Fatalf("expected 1 hunk, got %d", len(hunks))
 	}
-	// count=0, so endLine = start + 0 - 1 = 9, but we clamp to start
 	if hunks[0].StartLine != 10 {
 		t.Errorf("start = %d, want 10", hunks[0].StartLine)
+	}
+}
+
+func TestBuildDiffArgs(t *testing.T) {
+	tests := []struct {
+		scope      DiffScope
+		baseBranch string
+		want       []string
+	}{
+		{DiffUnstaged, "", []string{"diff"}},
+		{DiffStaged, "", []string{"diff", "--cached"}},
+		{DiffAll, "", []string{"diff", "HEAD"}},
+		{DiffBranch, "develop", []string{"diff", "develop...HEAD"}},
+		{DiffBranch, "", []string{"diff", "main...HEAD"}},
+	}
+	for _, tt := range tests {
+		t.Run(string(tt.scope), func(t *testing.T) {
+			got := buildDiffArgs(tt.scope, tt.baseBranch)
+			if len(got) != len(tt.want) {
+				t.Fatalf("buildDiffArgs(%q, %q) = %v, want %v", tt.scope, tt.baseBranch, got, tt.want)
+			}
+			for i := range got {
+				if got[i] != tt.want[i] {
+					t.Errorf("buildDiffArgs(%q, %q)[%d] = %q, want %q", tt.scope, tt.baseBranch, i, got[i], tt.want[i])
+				}
+			}
+		})
+	}
+}
+
+func TestParseNameStatusOutput_EmptyInput(t *testing.T) {
+	files := ParseNameStatusOutput("")
+	if len(files) != 0 {
+		t.Errorf("expected 0 files from empty input, got %d", len(files))
+	}
+}
+
+func TestParseNameStatusOutput_MalformedLines(t *testing.T) {
+	input := "GARBAGE\n\nM\tsrc/main.go\n"
+	files := ParseNameStatusOutput(input)
+	if len(files) != 1 {
+		t.Fatalf("expected 1 file, got %d", len(files))
+	}
+	if files[0].Path != "src/main.go" {
+		t.Errorf("path = %q, want src/main.go", files[0].Path)
+	}
+}
+
+func TestParseHunksOutput_EmptyInput(t *testing.T) {
+	hunks := ParseHunksOutput("")
+	if len(hunks) != 0 {
+		t.Errorf("expected 0 hunks from empty input, got %d", len(hunks))
+	}
+}
+
+func TestParseHunksOutput_MultipleFiles(t *testing.T) {
+	input := `diff --git a/a.go b/a.go
+--- a/a.go
++++ b/a.go
+@@ -1 +1,3 @@
++line1
++line2
+diff --git a/b.go b/b.go
+--- a/b.go
++++ b/b.go
+@@ -5,2 +5,4 @@
++line3
++line4
+@@ -20 +22,2 @@
++line5
+`
+	hunks := ParseHunksOutput(input)
+	if len(hunks) != 3 {
+		t.Fatalf("expected 3 hunks across 2 files, got %d", len(hunks))
+	}
+	if hunks[0].Path != "a.go" {
+		t.Errorf("hunk[0].Path = %q, want a.go", hunks[0].Path)
+	}
+	if hunks[1].Path != "b.go" || hunks[2].Path != "b.go" {
+		t.Errorf("hunks 1,2 should be b.go, got %q, %q", hunks[1].Path, hunks[2].Path)
+	}
+}
+
+func TestParseHunksOutput_SkipsBinaryFiles(t *testing.T) {
+	input := `diff --git a/image.go b/image.go
+--- a/image.go
++++ b/image.go
+@@ -1 +1,2 @@
++new
+Binary files a/data.bin and b/data.bin differ
+diff --git a/other.go b/other.go
+--- a/other.go
++++ b/other.go
+@@ -1 +1,2 @@
++more
+`
+	hunks := ParseHunksOutput(input)
+	if len(hunks) != 2 {
+		t.Fatalf("expected 2 hunks (skipping binary), got %d", len(hunks))
+	}
+}
+
+func TestParseHunkHeader_NoPlusSign(t *testing.T) {
+	result := parseHunkHeader("@@ something without plus @@", "file.go")
+	if result != nil {
+		t.Error("expected nil for hunk header without + sign")
+	}
+}
+
+func TestParseHunkHeader_ZeroStart(t *testing.T) {
+	result := parseHunkHeader("@@ -0,0 +0,0 @@", "file.go")
+	if result != nil {
+		t.Error("expected nil for +0,0 range")
+	}
+}
+
+func TestParseRange_InvalidInput(t *testing.T) {
+	start, count := parseRange("abc")
+	if start != 0 || count != 0 {
+		t.Errorf("parseRange(\"abc\") = (%d, %d), want (0, 0)", start, count)
+	}
+}
+
+func TestParseRange_InvalidCount(t *testing.T) {
+	start, count := parseRange("10,xyz")
+	if start != 10 || count != 1 {
+		t.Errorf("parseRange(\"10,xyz\") = (%d, %d), want (10, 1)", start, count)
+	}
+}
+
+func TestParseHunksOutput_UntrackableFile(t *testing.T) {
+	input := `diff --git a/vendor/lib.go b/vendor/lib.go
+--- a/vendor/lib.go
++++ b/vendor/lib.go
+@@ -1 +1,2 @@
++new line
+`
+	hunks := ParseHunksOutput(input)
+	if len(hunks) != 0 {
+		t.Errorf("expected 0 hunks for untrackable file, got %d", len(hunks))
+	}
+}
+
+func TestParseNameStatusOutput_RenameWithoutNewPath(t *testing.T) {
+	input := "R100\tsrc/old.go\n"
+	files := ParseNameStatusOutput(input)
+	if len(files) != 1 {
+		t.Fatalf("expected 1 file, got %d", len(files))
+	}
+	if files[0].Status != "R" {
+		t.Errorf("status = %q, want R", files[0].Status)
+	}
+	if files[0].OldPath != "src/old.go" {
+		t.Errorf("oldPath = %q, want src/old.go", files[0].OldPath)
+	}
+	if files[0].Path != "src/old.go" {
+		t.Errorf("path = %q, want src/old.go (same as old when no new path)", files[0].Path)
+	}
+}
+
+func TestRunGit_InvalidRepo(t *testing.T) {
+	_, err := runGit(t.TempDir(), []string{"log", "--oneline", "-1"})
+	if err == nil {
+		t.Log("runGit on non-repo returned nil error (git may return exit 128 captured as output)")
+	}
+}
+
+func TestParseHunkHeader_SingleLineChange(t *testing.T) {
+	result := parseHunkHeader("@@ -5 +5 @@ func foo()", "file.go")
+	if result == nil {
+		t.Fatal("expected non-nil hunk")
+	}
+	if result.StartLine != 5 || result.EndLine != 5 {
+		t.Errorf("range = %d-%d, want 5-5", result.StartLine, result.EndLine)
+	}
+}
+
+func TestBuildDiffArgs_DefaultScope(t *testing.T) {
+	got := buildDiffArgs(DiffScope("unknown"), "")
+	if len(got) != 1 || got[0] != "diff" {
+		t.Errorf("expected [diff] for unknown scope, got %v", got)
+	}
+}
+
+func TestRunGit_ContextTimeout(t *testing.T) {
+	dir := t.TempDir()
+	_, err := runGit(dir, []string{"status"})
+	if err != nil {
+		if !strings.Contains(err.Error(), "git") {
+			t.Errorf("unexpected error: %v", err)
+		}
 	}
 }

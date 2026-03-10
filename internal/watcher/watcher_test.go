@@ -2,6 +2,7 @@ package watcher
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sync/atomic"
@@ -293,5 +294,256 @@ func TestWatcherNewFileTriggersIndex(t *testing.T) {
 	w.pollAll()
 	if indexCount.Load() != 1 {
 		t.Errorf("new file should trigger index, got %d", indexCount.Load())
+	}
+}
+
+func TestSnapshotsEqualSameLengthDifferentKeys(t *testing.T) {
+	now := time.Now()
+	a := map[string]fileSnapshot{
+		"foo.go": {modTime: now, size: 10},
+	}
+	b := map[string]fileSnapshot{
+		"bar.go": {modTime: now, size: 10},
+	}
+	if snapshotsEqual(a, b) {
+		t.Error("same length but different keys should not be equal")
+	}
+}
+
+func TestPollAllSkipsNotDueProjects(t *testing.T) {
+	tmpDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(tmpDir, "main.go"), []byte("package main\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	r := newTestRouter(t, filepath.Base(tmpDir), tmpDir)
+	defer r.CloseAll()
+
+	var indexCount atomic.Int32
+	w := New(r, func(_ context.Context, _, _ string) error {
+		indexCount.Add(1)
+		return nil
+	})
+
+	w.pollAll()
+
+	futureTime := time.Now().Add(time.Second)
+	if err := os.Chtimes(filepath.Join(tmpDir, "main.go"), futureTime, futureTime); err != nil {
+		t.Fatal(err)
+	}
+
+	w.pollAll()
+	if indexCount.Load() != 0 {
+		t.Error("should skip project that is not due yet")
+	}
+}
+
+func TestPollAllSkipsProjectWithNoMetadata(t *testing.T) {
+	dbDir := t.TempDir()
+	r, err := store.NewRouterWithDir(dbDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.CloseAll()
+
+	_, err = r.ForProject("orphan")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var indexCount atomic.Int32
+	w := New(r, func(_ context.Context, _, _ string) error {
+		indexCount.Add(1)
+		return nil
+	})
+
+	w.pollAll()
+	if indexCount.Load() != 0 {
+		t.Error("should skip project with no metadata row")
+	}
+}
+
+func TestPollProjectIndexFnError(t *testing.T) {
+	tmpDir := t.TempDir()
+	goFile := filepath.Join(tmpDir, "main.go")
+	if err := os.WriteFile(goFile, []byte("package main\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	r := newTestRouter(t, filepath.Base(tmpDir), tmpDir)
+	defer r.CloseAll()
+
+	var indexCount atomic.Int32
+	indexErr := fmt.Errorf("index failed")
+	w := New(r, func(_ context.Context, _, _ string) error {
+		indexCount.Add(1)
+		return indexErr
+	})
+	w.ctx = context.Background()
+
+	w.pollAll()
+
+	futureTime := time.Now().Add(time.Second)
+	if err := os.Chtimes(goFile, futureTime, futureTime); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, state := range w.projects {
+		state.nextPoll = time.Time{}
+	}
+
+	w.pollAll()
+	if indexCount.Load() != 1 {
+		t.Errorf("expected indexFn to be called once, got %d", indexCount.Load())
+	}
+
+	projName := filepath.Base(tmpDir)
+	state := w.projects[projName]
+	if state == nil {
+		t.Fatal("expected project state to exist")
+	}
+
+	snap1, err := captureSnapshot(tmpDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshotsEqual(state.snapshot, snap1) {
+		t.Error("snapshot should not be updated after indexFn error")
+	}
+}
+
+func TestRunTickerFiresBeforeCancel(t *testing.T) {
+	tmpDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(tmpDir, "main.go"), []byte("package main\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	r := newTestRouter(t, filepath.Base(tmpDir), tmpDir)
+	defer r.CloseAll()
+
+	var pollCount atomic.Int32
+	w := New(r, func(_ context.Context, _, _ string) error {
+		pollCount.Add(1)
+		return nil
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		w.Run(ctx)
+		close(done)
+	}()
+
+	time.Sleep(1500 * time.Millisecond)
+	cancel()
+
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("watcher did not stop after context cancellation")
+	}
+
+	if len(w.projects) == 0 {
+		t.Error("expected at least one project to be polled via ticker")
+	}
+}
+
+func TestCaptureSnapshotEmptyDir(t *testing.T) {
+	tmpDir := t.TempDir()
+	snap, err := captureSnapshot(tmpDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snap) != 0 {
+		t.Errorf("expected 0 files in empty dir, got %d", len(snap))
+	}
+}
+
+func TestPollProjectRootDeletedAfterBaseline(t *testing.T) {
+	tmpDir := t.TempDir()
+	goFile := filepath.Join(tmpDir, "main.go")
+	if err := os.WriteFile(goFile, []byte("package main\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	r := newTestRouter(t, filepath.Base(tmpDir), tmpDir)
+	defer r.CloseAll()
+
+	var indexCount atomic.Int32
+	w := New(r, func(_ context.Context, _, _ string) error {
+		indexCount.Add(1)
+		return nil
+	})
+	w.ctx = context.Background()
+
+	w.pollAll()
+
+	projName := filepath.Base(tmpDir)
+	state := w.projects[projName]
+	if state == nil {
+		t.Fatal("expected project state after baseline poll")
+	}
+
+	if err := os.RemoveAll(tmpDir); err != nil {
+		t.Fatal(err)
+	}
+
+	state.nextPoll = time.Time{}
+	proj := &store.Project{Name: projName, RootPath: tmpDir}
+	w.pollProject(proj, state)
+
+	if indexCount.Load() != 0 {
+		t.Errorf("should not index when root is gone, got %d", indexCount.Load())
+	}
+
+	if state.nextPoll.Before(time.Now().Add(50 * time.Second)) {
+		t.Error("nextPoll should be set to maxInterval when root is gone")
+	}
+}
+
+func TestPollProjectIndexFnErrorPreservesOldSnapshot(t *testing.T) {
+	tmpDir := t.TempDir()
+	goFile := filepath.Join(tmpDir, "main.go")
+	if err := os.WriteFile(goFile, []byte("package main\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	r := newTestRouter(t, filepath.Base(tmpDir), tmpDir)
+	defer r.CloseAll()
+
+	callCount := 0
+	w := New(r, func(_ context.Context, _, _ string) error {
+		callCount++
+		return fmt.Errorf("reindex failed")
+	})
+	w.ctx = context.Background()
+
+	w.pollAll()
+
+	projName := filepath.Base(tmpDir)
+	state := w.projects[projName]
+	oldSnap := state.snapshot
+
+	futureTime := time.Now().Add(2 * time.Second)
+	if err := os.Chtimes(goFile, futureTime, futureTime); err != nil {
+		t.Fatal(err)
+	}
+
+	state.nextPoll = time.Time{}
+	w.pollAll()
+
+	if callCount != 1 {
+		t.Errorf("expected 1 indexFn call, got %d", callCount)
+	}
+
+	if !snapshotsEqual(state.snapshot, oldSnap) {
+		t.Error("snapshot should be preserved after indexFn error")
+	}
+
+	state.nextPoll = time.Time{}
+	w.pollAll()
+
+	if callCount != 2 {
+		t.Errorf("expected 2 indexFn calls (retry), got %d", callCount)
 	}
 }

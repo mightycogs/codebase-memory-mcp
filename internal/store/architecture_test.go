@@ -1046,3 +1046,433 @@ func TestIsTestFilePath(t *testing.T) {
 		}
 	}
 }
+
+func TestClassifyLayer(t *testing.T) {
+	tests := []struct {
+		name           string
+		in, out        int
+		hasRoutes      bool
+		hasEntryPoints bool
+		wantLayer      string
+		wantReason     string
+	}{
+		{
+			name:           "entry point with outbound only",
+			in:             0,
+			out:            5,
+			hasEntryPoints: true,
+			wantLayer:      "entry",
+			wantReason:     "has entry points, only outbound calls",
+		},
+		{
+			name:      "api layer with routes",
+			in:        2,
+			out:       3,
+			hasRoutes: true,
+			wantLayer: "api",
+			wantReason: "has HTTP route definitions",
+		},
+		{
+			name:      "core layer high fan-in",
+			in:        10,
+			out:       2,
+			wantLayer: "core",
+		},
+		{
+			name:      "leaf only inbound",
+			in:        3,
+			out:       0,
+			wantLayer: "leaf",
+			wantReason: "only inbound calls, no outbound",
+		},
+		{
+			name:      "entry only outbound no entry points flag",
+			in:        0,
+			out:       4,
+			wantLayer: "entry",
+			wantReason: "only outbound calls",
+		},
+		{
+			name:      "internal default",
+			in:        2,
+			out:       2,
+			wantLayer: "internal",
+		},
+		{
+			name:      "internal zero both",
+			in:        0,
+			out:       0,
+			wantLayer: "internal",
+		},
+		{
+			name:      "not core when fan-in not high enough",
+			in:        3,
+			out:       2,
+			wantLayer: "internal",
+		},
+		{
+			name:           "entry points but has inbound calls",
+			in:             2,
+			out:            5,
+			hasEntryPoints: true,
+			wantLayer:      "internal",
+		},
+		{
+			name:           "routes take precedence over entry points with inbound",
+			in:             1,
+			out:            5,
+			hasRoutes:      true,
+			hasEntryPoints: true,
+			wantLayer:      "api",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			layer, reason := classifyLayer("pkg", tt.in, tt.out, tt.hasRoutes, tt.hasEntryPoints)
+			if layer != tt.wantLayer {
+				t.Errorf("layer = %q, want %q", layer, tt.wantLayer)
+			}
+			if tt.wantReason != "" && reason != tt.wantReason {
+				t.Errorf("reason = %q, want %q", reason, tt.wantReason)
+			}
+		})
+	}
+}
+
+func TestRegisterFilePath(t *testing.T) {
+	t.Run("single file no directory", func(t *testing.T) {
+		dc := map[string]map[string]bool{}
+		registerFilePath("main.go", dc)
+		if dc[""] == nil || !dc[""]["main.go"] {
+			t.Error("expected root to contain main.go")
+		}
+	})
+
+	t.Run("nested path registers up to 3 levels", func(t *testing.T) {
+		dc := map[string]map[string]bool{}
+		registerFilePath("src/internal/store/search.go", dc)
+		if !dc[""]["src"] {
+			t.Error("expected root to contain src")
+		}
+		if !dc["src"]["internal"] {
+			t.Error("expected src to contain internal")
+		}
+		if !dc["src/internal"]["store"] {
+			t.Error("expected src/internal to contain store")
+		}
+		if !dc["src/internal/store"]["search.go"] {
+			t.Error("expected src/internal/store to contain search.go")
+		}
+	})
+
+	t.Run("depth limited to 3", func(t *testing.T) {
+		dc := map[string]map[string]bool{}
+		registerFilePath("a/b/c/d/e/f.go", dc)
+		if dc["a/b/c/d"] != nil {
+			t.Error("should not register beyond depth 3")
+		}
+		if !dc["a/b/c"]["d"] {
+			t.Error("expected a/b/c to contain d")
+		}
+	})
+
+	t.Run("two-segment path", func(t *testing.T) {
+		dc := map[string]map[string]bool{}
+		registerFilePath("pkg/file.go", dc)
+		if !dc[""]["pkg"] {
+			t.Error("expected root to contain pkg")
+		}
+		if !dc["pkg"]["file.go"] {
+			t.Error("expected pkg to contain file.go")
+		}
+	})
+}
+
+func TestCollectTreeEntries(t *testing.T) {
+	t.Run("root files and dirs", func(t *testing.T) {
+		dc := map[string]map[string]bool{
+			"":    {"src": true, "main.go": true},
+			"src": {"handler.go": true, "service": true},
+		}
+		fs := map[string]bool{"main.go": true, "src/handler.go": true}
+		result := collectTreeEntries(dc, fs)
+
+		entryMap := map[string]FileTreeEntry{}
+		for _, e := range result {
+			entryMap[e.Path] = e
+		}
+
+		if entryMap["main.go"].Type != "file" {
+			t.Errorf("main.go type = %q, want file", entryMap["main.go"].Type)
+		}
+		if entryMap["src"].Type != "dir" {
+			t.Errorf("src type = %q, want dir", entryMap["src"].Type)
+		}
+		if entryMap["src/handler.go"].Type != "file" {
+			t.Errorf("src/handler.go type = %q, want file", entryMap["src/handler.go"].Type)
+		}
+		if entryMap["src/service"].Type != "dir" {
+			t.Errorf("src/service type = %q, want dir", entryMap["src/service"].Type)
+		}
+	})
+
+	t.Run("empty dir map", func(t *testing.T) {
+		result := collectTreeEntries(map[string]map[string]bool{}, map[string]bool{})
+		if len(result) != 0 {
+			t.Errorf("expected 0 entries, got %d", len(result))
+		}
+	})
+
+	t.Run("skips dirs at depth >= 3", func(t *testing.T) {
+		dc := map[string]map[string]bool{
+			"":          {"a": true},
+			"a":         {"b": true},
+			"a/b":       {"c": true},
+			"a/b/c":     {"d": true},
+			"a/b/c/d":   {"e": true},
+		}
+		fs := map[string]bool{}
+		result := collectTreeEntries(dc, fs)
+
+		paths := map[string]bool{}
+		for _, e := range result {
+			paths[e.Path] = true
+		}
+		if paths["a/b/c/d/e"] {
+			t.Error("should not include entries from depth >= 3 dir")
+		}
+		if !paths["a/b/c/d"] {
+			t.Error("expected a/b/c/d from depth-2 dir a/b/c")
+		}
+	})
+
+	t.Run("children count reflects subdirectory", func(t *testing.T) {
+		dc := map[string]map[string]bool{
+			"":    {"pkg": true},
+			"pkg": {"a.go": true, "b.go": true, "sub": true},
+			"pkg/sub": {"c.go": true},
+		}
+		fs := map[string]bool{"pkg/a.go": true, "pkg/b.go": true, "pkg/sub/c.go": true}
+		result := collectTreeEntries(dc, fs)
+
+		for _, e := range result {
+			if e.Path == "pkg" && e.Children != 3 {
+				t.Errorf("pkg children = %d, want 3", e.Children)
+			}
+			if e.Path == "pkg/sub" && e.Children != 1 {
+				t.Errorf("pkg/sub children = %d, want 1", e.Children)
+			}
+		}
+	})
+}
+
+func TestArchPackagesByQN(t *testing.T) {
+	s, err := OpenMemory()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+
+	if err := s.UpsertProject("test", "/tmp/test"); err != nil {
+		t.Fatal(err)
+	}
+
+	_, _ = s.UpsertNode(&Node{
+		Project: "test", Label: "Function", Name: "Foo",
+		QualifiedName: "test.internal.handler.Foo",
+	})
+	_, _ = s.UpsertNode(&Node{
+		Project: "test", Label: "Function", Name: "Bar",
+		QualifiedName: "test.internal.handler.Bar",
+	})
+	_, _ = s.UpsertNode(&Node{
+		Project: "test", Label: "Method", Name: "Baz",
+		QualifiedName: "test.internal.service.Baz",
+	})
+	_, _ = s.UpsertNode(&Node{
+		Project: "test", Label: "Class", Name: "Qux",
+		QualifiedName: "test.internal.service.Qux",
+	})
+
+	pkgs, err := s.archPackagesByQN("test")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if len(pkgs) == 0 {
+		t.Fatal("expected packages from QN fallback")
+	}
+
+	pkgMap := map[string]int{}
+	for _, p := range pkgs {
+		pkgMap[p.Name] = p.NodeCount
+	}
+	if pkgMap["handler"] != 2 {
+		t.Errorf("handler count = %d, want 2", pkgMap["handler"])
+	}
+	if pkgMap["service"] != 2 {
+		t.Errorf("service count = %d, want 2", pkgMap["service"])
+	}
+}
+
+func TestArchPackagesByQNEmpty(t *testing.T) {
+	s, err := OpenMemory()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+
+	if err := s.UpsertProject("test", "/tmp/test"); err != nil {
+		t.Fatal(err)
+	}
+
+	pkgs, err := s.archPackagesByQN("test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pkgs) != 0 {
+		t.Errorf("expected 0 packages, got %d", len(pkgs))
+	}
+}
+
+func TestArchPackagesByQNSortAndLimit(t *testing.T) {
+	s, err := OpenMemory()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+
+	if err := s.UpsertProject("test", "/tmp/test"); err != nil {
+		t.Fatal(err)
+	}
+
+	for i := 0; i < 20; i++ {
+		pkg := string(rune('a' + i%20))
+		_, _ = s.UpsertNode(&Node{
+			Project:       "test",
+			Label:         "Function",
+			Name:          strings.Repeat(pkg, 3),
+			QualifiedName: "test.internal." + pkg + "." + strings.Repeat(pkg, 3),
+		})
+	}
+
+	pkgs, err := s.archPackagesByQN("test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pkgs) > 15 {
+		t.Errorf("expected at most 15 packages, got %d", len(pkgs))
+	}
+	for i := 1; i < len(pkgs); i++ {
+		if pkgs[i].NodeCount > pkgs[i-1].NodeCount {
+			t.Errorf("packages not sorted by count descending at index %d", i)
+		}
+	}
+}
+
+func TestArchServices(t *testing.T) {
+	s, err := OpenMemory()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+
+	if err := s.UpsertProject("test", "/tmp/test"); err != nil {
+		t.Fatal(err)
+	}
+
+	idA, _ := s.UpsertNode(&Node{
+		Project: "test", Label: "Function", Name: "caller",
+		QualifiedName: "test.frontend.caller",
+	})
+	idB, _ := s.UpsertNode(&Node{
+		Project: "test", Label: "Function", Name: "handler",
+		QualifiedName: "test.backend.handler",
+	})
+	idC, _ := s.UpsertNode(&Node{
+		Project: "test", Label: "Function", Name: "worker",
+		QualifiedName: "test.worker.process",
+	})
+
+	_, _ = s.InsertEdge(&Edge{Project: "test", SourceID: idA, TargetID: idB, Type: "HTTP_CALLS"})
+	_, _ = s.InsertEdge(&Edge{Project: "test", SourceID: idB, TargetID: idC, Type: "ASYNC_CALLS"})
+
+	services, err := s.archServices("test")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if len(services) != 2 {
+		t.Fatalf("expected 2 service links, got %d", len(services))
+	}
+
+	linkMap := map[string]ServiceLink{}
+	for _, sl := range services {
+		linkMap[sl.From+"->"+sl.To] = sl
+	}
+
+	http := linkMap["frontend->backend"]
+	if http.Type != "HTTP_CALLS" || http.Count != 1 {
+		t.Errorf("HTTP link: type=%q count=%d, want HTTP_CALLS/1", http.Type, http.Count)
+	}
+
+	async := linkMap["backend->worker"]
+	if async.Type != "ASYNC_CALLS" || async.Count != 1 {
+		t.Errorf("ASYNC link: type=%q count=%d, want ASYNC_CALLS/1", async.Type, async.Count)
+	}
+}
+
+func TestArchServicesEmpty(t *testing.T) {
+	s, err := OpenMemory()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+
+	if err := s.UpsertProject("test", "/tmp/test"); err != nil {
+		t.Fatal(err)
+	}
+
+	services, err := s.archServices("test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(services) != 0 {
+		t.Errorf("expected 0 service links, got %d", len(services))
+	}
+}
+
+func TestMaxADRLength(t *testing.T) {
+	if MaxADRLength() != maxADRLength {
+		t.Errorf("MaxADRLength() = %d, want %d", MaxADRLength(), maxADRLength)
+	}
+	if MaxADRLength() != 8000 {
+		t.Errorf("MaxADRLength() = %d, want 8000", MaxADRLength())
+	}
+}
+
+func TestCanonicalSectionNames(t *testing.T) {
+	names := CanonicalSectionNames()
+	if len(names) != 6 {
+		t.Fatalf("expected 6 canonical sections, got %d", len(names))
+	}
+	expected := []string{"PURPOSE", "STACK", "ARCHITECTURE", "PATTERNS", "TRADEOFFS", "PHILOSOPHY"}
+	for i, name := range names {
+		if name != expected[i] {
+			t.Errorf("section[%d] = %q, want %q", i, name, expected[i])
+		}
+	}
+}
+
+func TestGetArchitectureError(t *testing.T) {
+	s, err := OpenMemory()
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.Close()
+
+	_, err = s.GetArchitecture("test", nil)
+	if err == nil {
+		t.Error("expected error from closed store")
+	}
+}
