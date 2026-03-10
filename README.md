@@ -8,19 +8,18 @@ Single Go binary. No Docker, no databases, no API keys.
 
 ## Getting Started
 
-Download the binary for your platform from the [latest release](https://github.com/mightycogs/codebase-memory-mcp/releases/latest), then:
+Requires Go 1.26+ and a C compiler (`xcode-select --install` on macOS).
 
 ```bash
-tar xzf codebase-memory-mcp-*.tar.gz
-mv codebase-memory-mcp ~/.local/bin/
+git clone https://github.com/mightycogs/codebase-memory-mcp.git
+cd codebase-memory-mcp
+make install
 codebase-memory-mcp install
 ```
 
 Restart your editor. The `install` command auto-detects Claude Code, Codex CLI, Cursor, Windsurf, Gemini CLI, VS Code, and Zed -- registers the MCP server and installs task-specific skills.
 
 Now open any project and say **"Index this project"**. That's it. The graph persists in `~/.cache/codebase-memory-mcp/` and auto-syncs when files change.
-
-To build from source instead, see [Building from Source](#building-from-source).
 
 ## Everyday Usage
 
@@ -93,49 +92,6 @@ Full schema: [docs/GRAPH-MODEL.md](docs/GRAPH-MODEL.md)
 ## Excluding Files
 
 Place a `.cgrignore` in your project root (one glob pattern per line) to skip directories or files during indexing. Common directories like `.git`, `node_modules`, `vendor`, `__pycache__`, `dist`, and `build` are always excluded.
-
-## Building from Source
-
-Requires Go 1.26+ and a C compiler (tree-sitter uses CGO).
-
-```bash
-git clone https://github.com/mightycogs/codebase-memory-mcp.git
-cd codebase-memory-mcp
-make install
-```
-
-<details>
-<summary>Windows</summary>
-
-**MSYS2 (UCRT64 shell):**
-
-```bash
-pacman -S mingw-w64-ucrt-x86_64-gcc
-CGO_ENABLED=1 CC=gcc go build -o codebase-memory-mcp.exe ./cmd/codebase-memory-mcp/
-```
-
-**WSL:**
-
-```bash
-sudo apt update && sudo apt install build-essential
-CGO_ENABLED=1 go build -buildvcs=false -o ~/.local/bin/codebase-memory-mcp ./cmd/codebase-memory-mcp/
-```
-
-When using WSL, point your editor at the binary via `wsl.exe`:
-
-```json
-{
-  "mcpServers": {
-    "codebase-memory-mcp": {
-      "type": "stdio",
-      "command": "wsl.exe",
-      "args": ["-d", "Ubuntu", "--", "/home/YOUR_USER/.local/bin/codebase-memory-mcp"]
-    }
-  }
-}
-```
-
-</details>
 
 ## Reference
 
